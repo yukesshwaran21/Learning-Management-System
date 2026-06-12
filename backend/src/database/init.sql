@@ -12,7 +12,11 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Represents all system users (admin, instructor, student)
 -- Role-based access is enforced at the application layer
 -- ──────────────────────────────────────────────
-CREATE TYPE user_role AS ENUM ('admin', 'instructor', 'student');
+DO $$ BEGIN
+  CREATE TYPE user_role AS ENUM ('admin', 'instructor', 'student');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS users (
     id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -44,8 +48,17 @@ CREATE TABLE IF NOT EXISTS categories (
 -- A course belongs to one instructor (user with role=instructor)
 -- and one category. Price=0 means free course.
 -- ──────────────────────────────────────────────
-CREATE TYPE course_status AS ENUM ('draft', 'published', 'archived');
-CREATE TYPE course_level  AS ENUM ('beginner', 'intermediate', 'advanced');
+DO $$ BEGIN
+  CREATE TYPE course_status AS ENUM ('draft', 'published', 'archived');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE course_level AS ENUM ('beginner', 'intermediate', 'advanced');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS courses (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -86,7 +99,11 @@ CREATE TABLE IF NOT EXISTS sections (
 -- content_type distinguishes video vs article lessons.
 -- video_url points to Cloudinary; duration in seconds.
 -- ──────────────────────────────────────────────
-CREATE TYPE lesson_content_type AS ENUM ('video', 'article');
+DO $$ BEGIN
+  CREATE TYPE lesson_content_type AS ENUM ('video', 'article');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS lessons (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -108,7 +125,11 @@ CREATE TABLE IF NOT EXISTS lessons (
 -- Records a student's enrollment in a course.
 -- A student can only enroll once in a given course.
 -- ──────────────────────────────────────────────
-CREATE TYPE enrollment_status AS ENUM ('active', 'completed', 'cancelled');
+DO $$ BEGIN
+  CREATE TYPE enrollment_status AS ENUM ('active', 'completed', 'cancelled');
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS enrollments (
     id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -179,6 +200,39 @@ CREATE INDEX IF NOT EXISTS idx_enrollments_course   ON enrollments(course_id);
 CREATE INDEX IF NOT EXISTS idx_lesson_progress_enr  ON lesson_progress(enrollment_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_course       ON reviews(course_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user  ON refresh_tokens(user_id);
+
+-- ──────────────────────────────────────────────
+-- Table: quizzes
+-- One question per row, linked to a lesson.
+-- options: JSONB array of answer strings.
+-- correct_answer: 0-based index into options.
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS quizzes (
+    id             UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lesson_id      UUID        NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    question       TEXT        NOT NULL,
+    options        JSONB       NOT NULL,   -- e.g. ["Paris", "London", "Berlin"]
+    correct_answer INTEGER     NOT NULL,   -- 0-based index
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ──────────────────────────────────────────────
+-- Table: quiz_attempts
+-- Every time a student answers a quiz question.
+-- is_correct is pre-computed for fast analytics.
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+    id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    student_id      UUID        NOT NULL REFERENCES users(id)   ON DELETE CASCADE,
+    quiz_id         UUID        NOT NULL REFERENCES quizzes(id) ON DELETE CASCADE,
+    selected_answer INTEGER     NOT NULL,  -- 0-based index chosen
+    is_correct      BOOLEAN     NOT NULL DEFAULT FALSE,
+    attempted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quizzes_lesson         ON quizzes(lesson_id);
+CREATE INDEX IF NOT EXISTS idx_quiz_attempts_student  ON quiz_attempts(student_id);
+CREATE INDEX IF NOT EXISTS idx_quiz_attempts_quiz     ON quiz_attempts(quiz_id);
 
 -- ──────────────────────────────────────────────
 -- Function: update_updated_at_column

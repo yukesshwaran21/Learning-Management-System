@@ -16,7 +16,10 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./backend/src/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # schema.sql (10_) runs first — the canonical 7-table schema
+      - ./backend/config/schema.sql:/docker-entrypoint-initdb.d/10_schema.sql
+      # init.sql (20_) runs second — extended schema + triggers + seed data
+      - ./backend/src/database/init.sql:/docker-entrypoint-initdb.d/20_init.sql
     networks:
       - lms_network
     healthcheck:
