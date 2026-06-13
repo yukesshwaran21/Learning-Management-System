@@ -1,18 +1,20 @@
 -- ============================================================
--- LMS Database Schema
+-- LMS Database Schema  (Canonical — runs first via 10_schema.sql)
 -- File: backend/config/schema.sql
 -- Auto-executed on first Docker startup via:
---   docker-entrypoint-initdb.d/schema.sql
+--   docker-entrypoint-initdb.d/10_schema.sql
 --
--- Java-style naming convention used in all comments.
--- All tables use UUID primary keys for distributed safety.
+-- NOTE: backend/src/database/init.sql (20_init.sql) runs AFTER
+-- this file and is the extended schema used by the application.
+-- This file is kept in sync as the single source of truth for
+-- the 7-table core structure specified in the project brief.
 -- ============================================================
 
 -- Enable UUID generation extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ──────────────────────────────────────────────────────────────
--- ENUM: UserRole
+-- ENUM: user_role
 -- Restricts the role column to exactly three valid values.
 -- ──────────────────────────────────────────────────────────────
 DO $$ BEGIN
@@ -24,17 +26,21 @@ END $$;
 -- ──────────────────────────────────────────────────────────────
 -- TABLE: users
 -- Stores every platform user regardless of role.
--- Passwords are stored as bcrypt hashes, never plaintext.
+-- Passwords are stored as bcrypt hashes (column: password_hash).
 -- avatar_url references a Cloudinary-hosted image.
+-- is_active supports soft-delete without destroying FK references.
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
-    id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name       VARCHAR(255)            NOT NULL,
-    email      VARCHAR(255) UNIQUE     NOT NULL,
-    password   VARCHAR(255)            NOT NULL,         -- bcrypt hash
-    role       user_role               NOT NULL DEFAULT 'student',
-    avatar_url TEXT,
-    created_at TIMESTAMPTZ             NOT NULL DEFAULT NOW()
+    id            UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name          VARCHAR(255)             NOT NULL,
+    email         VARCHAR(255) UNIQUE      NOT NULL,
+    password_hash VARCHAR(255)             NOT NULL,   -- bcrypt hash; NEVER plaintext
+    role          user_role                NOT NULL DEFAULT 'student',
+    avatar_url    TEXT,
+    bio           TEXT,
+    is_active     BOOLEAN                  NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ              NOT NULL DEFAULT NOW()
 );
 
 -- ──────────────────────────────────────────────────────────────
@@ -52,7 +58,8 @@ CREATE TABLE IF NOT EXISTS courses (
     price         DECIMAL(10,2)            NOT NULL DEFAULT 0.00,
     is_published  BOOLEAN                  NOT NULL DEFAULT FALSE,
     category      VARCHAR(100),
-    created_at    TIMESTAMPTZ              NOT NULL DEFAULT NOW()
+    created_at    TIMESTAMPTZ              NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ              NOT NULL DEFAULT NOW()
 );
 
 -- ──────────────────────────────────────────────────────────────
@@ -64,14 +71,14 @@ CREATE TABLE IF NOT EXISTS courses (
 -- duration_seconds is populated after FFmpeg processing.
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS lessons (
-    id               UUID    PRIMARY KEY DEFAULT uuid_generate_v4(),
-    course_id        UUID             NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-    title            VARCHAR(255)     NOT NULL,
+    id               UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    course_id        UUID                    NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    title            VARCHAR(255)            NOT NULL,
     video_url        TEXT,
-    duration_seconds INTEGER          NOT NULL DEFAULT 0,
-    order_index      INTEGER          NOT NULL DEFAULT 0,
-    is_preview       BOOLEAN          NOT NULL DEFAULT FALSE,
-    created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+    duration_seconds INTEGER                 NOT NULL DEFAULT 0,
+    order_index      INTEGER                 NOT NULL DEFAULT 0,
+    is_preview       BOOLEAN                 NOT NULL DEFAULT FALSE,
+    created_at       TIMESTAMPTZ             NOT NULL DEFAULT NOW()
 );
 
 -- ──────────────────────────────────────────────────────────────
@@ -81,8 +88,8 @@ CREATE TABLE IF NOT EXISTS lessons (
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS enrollments (
     id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
-    student_id  UUID        NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
-    course_id   UUID        NOT NULL REFERENCES courses(id)  ON DELETE CASCADE,
+    student_id  UUID        NOT NULL REFERENCES users(id)   ON DELETE CASCADE,
+    course_id   UUID        NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (student_id, course_id)
 );
@@ -107,17 +114,16 @@ CREATE TABLE IF NOT EXISTS progress (
 -- ──────────────────────────────────────────────────────────────
 -- TABLE: quizzes
 -- One quiz question per row, attached to a specific lesson.
--- options is a JSONB array, e.g.:
---   ["Paris", "London", "Berlin", "Madrid"]
+-- options is a JSONB array, e.g. ["Paris", "London", "Berlin"]
 -- correct_answer is a 0-based index into the options array.
 -- ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS quizzes (
-    id             UUID    PRIMARY KEY DEFAULT uuid_generate_v4(),
-    lesson_id      UUID             NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    question       TEXT             NOT NULL,
-    options        JSONB            NOT NULL,   -- array of answer strings
-    correct_answer INTEGER          NOT NULL,   -- 0-based index
-    created_at     TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+    id             UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    lesson_id      UUID                    NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    question       TEXT                    NOT NULL,
+    options        JSONB                   NOT NULL,   -- array of answer strings
+    correct_answer INTEGER                 NOT NULL,   -- 0-based index
+    created_at     TIMESTAMPTZ             NOT NULL DEFAULT NOW()
 );
 
 -- ──────────────────────────────────────────────────────────────
@@ -133,6 +139,22 @@ CREATE TABLE IF NOT EXISTS quiz_attempts (
     selected_answer INTEGER     NOT NULL,    -- 0-based index chosen by student
     is_correct      BOOLEAN     NOT NULL DEFAULT FALSE,
     attempted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ──────────────────────────────────────────────────────────────
+-- TABLE: refresh_tokens
+-- Stores hashed refresh tokens for JWT rotation strategy.
+-- token_hash is a bcrypt hash — raw token is never persisted.
+-- Revoked tokens are soft-deleted via revoked_at timestamp.
+-- Required by: backend/src/models/TokenModel.js
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id          UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id     UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash  VARCHAR(255) NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ  NOT NULL,
+    revoked_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 -- ══════════════════════════════════════════════════════════════
@@ -178,9 +200,32 @@ CREATE INDEX IF NOT EXISTS idx_quiz_attempts_student
 CREATE INDEX IF NOT EXISTS idx_quiz_attempts_quiz
     ON quiz_attempts(quiz_id);
 
+-- RefreshTokenLookup: find active tokens by user
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
+    ON refresh_tokens(user_id);
+
 -- ══════════════════════════════════════════════════════════════
--- SEED DATA
--- Safe to re-run (ON CONFLICT DO NOTHING).
--- Default categories for the course browser.
+-- AUTO-UPDATE TRIGGER
+-- Keeps updated_at accurate on every UPDATE without app-layer code.
 -- ══════════════════════════════════════════════════════════════
--- (No seed users here — passwords must be hashed by the app layer)
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trigger_users_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE OR REPLACE TRIGGER trigger_courses_updated_at
+    BEFORE UPDATE ON courses
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ══════════════════════════════════════════════════════════════
+-- NOTE ON SEED DATA
+-- Passwords MUST be bcrypt-hashed by the application layer.
+-- Default categories and admin seed are in 20_init.sql.
+-- ══════════════════════════════════════════════════════════════
